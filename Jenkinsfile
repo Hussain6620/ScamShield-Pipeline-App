@@ -10,6 +10,12 @@ pipeline {
 
         PRODUCTION_CONTAINER = 'scamshield-production'
         PRODUCTION_PORT = '3000'
+
+        MONITORING_NETWORK = 'scamshield-monitoring'
+        PROMETHEUS_CONTAINER = 'scamshield-prometheus'
+        PROMETHEUS_PORT = '9090'
+        ALERTMANAGER_CONTAINER = 'scamshield-alertmanager'
+        ALERTMANAGER_PORT = '9093'
     }
 
     stages {
@@ -163,7 +169,6 @@ pipeline {
                 bat 'docker images %APP_NAME%'
 
                 bat 'docker rm -f %PRODUCTION_CONTAINER% >nul 2>&1 || echo No previous production container to remove.'
-
                 bat 'docker rm -f scamshield-local >nul 2>&1 || echo No earlier local test container to remove.'
 
                 bat 'docker run -d --name %PRODUCTION_CONTAINER% -p %PRODUCTION_PORT%:3000 -e NODE_ENV=production %APP_NAME%:v1.0.%BUILD_NUMBER%'
@@ -196,6 +201,90 @@ pipeline {
                 echo 'Production release completed successfully.'
             }
         }
+
+        stage('Monitoring and Alerting') {
+            steps {
+                echo 'Preparing monitoring evidence folder...'
+                bat 'if exist monitoring-reports rmdir /s /q monitoring-reports'
+                bat 'mkdir monitoring-reports'
+
+                echo 'Creating the monitoring Docker network if it does not already exist...'
+                bat 'docker network inspect %MONITORING_NETWORK% >nul 2>&1 || docker network create %MONITORING_NETWORK%'
+
+                echo 'Checking the Prometheus configuration files...'
+                bat '''
+                    docker run --rm ^
+                    --entrypoint /bin/promtool ^
+                    -v "%CD%\\monitoring\\prometheus.yml:/etc/prometheus/prometheus.yml:ro" ^
+                    -v "%CD%\\monitoring\\alert-rules.yml:/etc/prometheus/alert-rules.yml:ro" ^
+                    prom/prometheus:v3.5.3 ^
+                    check config /etc/prometheus/prometheus.yml
+                '''
+
+                echo 'Removing older monitoring containers...'
+                bat 'docker rm -f %PROMETHEUS_CONTAINER% >nul 2>&1 || echo No previous Prometheus container to remove.'
+                bat 'docker rm -f %ALERTMANAGER_CONTAINER% >nul 2>&1 || echo No previous Alertmanager container to remove.'
+
+                echo 'Starting Alertmanager...'
+                bat '''
+                    docker run -d ^
+                    --name %ALERTMANAGER_CONTAINER% ^
+                    --network %MONITORING_NETWORK% ^
+                    -p %ALERTMANAGER_PORT%:9093 ^
+                    -v "%CD%\\monitoring\\alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro" ^
+                    prom/alertmanager:v0.32.1 ^
+                    --config.file=/etc/alertmanager/alertmanager.yml
+                '''
+
+                echo 'Starting Prometheus...'
+                bat '''
+                    docker run -d ^
+                    --name %PROMETHEUS_CONTAINER% ^
+                    --network %MONITORING_NETWORK% ^
+                    -p %PROMETHEUS_PORT%:9090 ^
+                    -v "%CD%\\monitoring\\prometheus.yml:/etc/prometheus/prometheus.yml:ro" ^
+                    -v "%CD%\\monitoring\\alert-rules.yml:/etc/prometheus/alert-rules.yml:ro" ^
+                    prom/prometheus:v3.5.3 ^
+                    --config.file=/etc/prometheus/prometheus.yml ^
+                    --web.enable-lifecycle
+                '''
+
+                script {
+                    echo 'Checking whether Prometheus and Alertmanager are ready...'
+
+                    def monitoringStatus = bat(
+                        returnStatus: true,
+                        script: '''
+                            @echo off
+                            for /L %%i in (1,1,10) do (
+                                curl.exe --fail --silent --show-error http://localhost:%PROMETHEUS_PORT%/-/ready >nul 2>&1 && (
+                                    curl.exe --fail --silent --show-error http://localhost:%ALERTMANAGER_PORT%/-/ready >nul 2>&1 && exit /b 0
+                                )
+                                echo Waiting for monitoring services to start...
+                                ping 127.0.0.1 -n 3 >nul
+                            )
+                            exit /b 1
+                        '''
+                    )
+
+                    if (monitoringStatus != 0) {
+                        echo 'Monitoring services failed to start. Displaying logs...'
+                        bat 'docker logs %PROMETHEUS_CONTAINER%'
+                        bat 'docker logs %ALERTMANAGER_CONTAINER%'
+                        error('Monitoring failed: Prometheus or Alertmanager is not ready.')
+                    }
+                }
+
+                echo 'Saving monitoring evidence from the running services...'
+                bat 'curl.exe --fail --silent --show-error http://localhost:%PROMETHEUS_PORT%/api/v1/targets > monitoring-reports\\prometheus-targets.json'
+                bat 'curl.exe --fail --silent --show-error http://localhost:%ALERTMANAGER_PORT%/api/v2/status > monitoring-reports\\alertmanager-status.json'
+
+                echo 'Showing running deployment and monitoring containers...'
+                bat 'docker ps --filter "name=scamshield"'
+
+                echo 'Monitoring and alerting services started successfully.'
+            }
+        }
     }
 
     post {
@@ -203,10 +292,11 @@ pipeline {
             echo 'Archiving pipeline evidence files...'
             archiveArtifacts artifacts: 'coverage/**/*', allowEmptyArchive: true
             archiveArtifacts artifacts: 'security-reports/**/*', allowEmptyArchive: true
+            archiveArtifacts artifacts: 'monitoring-reports/**/*', allowEmptyArchive: true
         }
 
         success {
-            echo 'Build, testing, code quality, security scanning, staging deployment and production release completed successfully.'
+            echo 'All seven required DevOps pipeline stages completed successfully.'
         }
 
         failure {

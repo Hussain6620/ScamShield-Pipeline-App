@@ -1,0 +1,24 @@
+groups:
+  - name: scamshield-production-alerts
+    rules:
+      - alert: ScamShieldProductionDown
+        expr: up{job="scamshield-production"} == 0
+        for: 15s
+        labels:
+          severity: critical
+          application: ScamShield
+          environment: production
+        annotations:
+          summary: "ScamShield production application is unavailable"
+          description: "Prometheus cannot access the production ScamShield metrics endpoint on port 3000."
+
+      - alert: ScamShieldNoChecksRecorded
+        expr: scamshield_checks_total{job="scamshield-production"} == 0
+        for: 2m
+        labels:
+          severity: warning
+          application: ScamShield
+          environment: production
+        annotations:
+          summary: "No ScamShield message checks have been recorded"
+          description: "The production application is running but no scam checking activity has been recorded."
