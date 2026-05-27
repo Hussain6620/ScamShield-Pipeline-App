@@ -49,7 +49,6 @@ pipeline {
                 }
             }
         }
-    }
 
         stage('Security') {
             steps {
@@ -95,15 +94,16 @@ pipeline {
                 }
             }
         }
+    }
 
-        post {
+    post {
         always {
             archiveArtifacts artifacts: 'coverage/**/*', allowEmptyArchive: true
             archiveArtifacts artifacts: 'security-reports/**/*', allowEmptyArchive: true
         }
 
         success {
-            echo 'Build, testing and code quality analysis completed successfully.'
+            echo 'Build, testing, code quality and security analysis completed successfully.'
         }
 
         failure {
