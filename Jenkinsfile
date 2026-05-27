@@ -4,11 +4,15 @@ pipeline {
     environment {
         APP_NAME = 'scamshield-pipeline-app'
         IMAGE_TAG = "${BUILD_NUMBER}"
+
+        STAGING_CONTAINER = 'scamshield-staging'
+        STAGING_PORT = '3001'
     }
 
     stages {
         stage('Environment Check') {
             steps {
+                echo 'Checking tools required for the pipeline...'
                 bat 'git --version'
                 bat 'node -v'
                 bat 'npm -v'
@@ -18,14 +22,20 @@ pipeline {
 
         stage('Build') {
             steps {
+                echo 'Installing Node.js dependencies...'
                 bat 'npm ci'
+
+                echo 'Building Docker image artefact...'
                 bat 'docker build -t %APP_NAME%:%IMAGE_TAG% .'
+
+                echo 'Displaying available ScamShield Docker images...'
                 bat 'docker images %APP_NAME%'
             }
         }
 
         stage('Test') {
             steps {
+                echo 'Running automated Jest and Supertest tests...'
                 bat 'npm test'
             }
         }
@@ -34,6 +44,8 @@ pipeline {
             steps {
                 script {
                     def scannerHome = tool 'SonarScanner'
+
+                    echo 'Running SonarQube code quality analysis...'
 
                     withSonarQubeEnv('LocalSonarQube') {
                         bat "\"${scannerHome}\\bin\\sonar-scanner.bat\" -Dsonar.projectVersion=%BUILD_NUMBER%"
@@ -44,6 +56,8 @@ pipeline {
 
         stage('Quality Gate') {
             steps {
+                echo 'Waiting for the SonarQube Quality Gate result...'
+
                 timeout(time: 5, unit: 'MINUTES') {
                     waitForQualityGate abortPipeline: true
                 }
@@ -52,10 +66,12 @@ pipeline {
 
         stage('Security') {
             steps {
-                bat 'if not exist security-reports mkdir security-reports'
+                echo 'Preparing security report folder...'
+                bat 'if exist security-reports rmdir /s /q security-reports'
+                bat 'mkdir security-reports'
 
                 script {
-                    echo 'Running npm dependency security audit...'
+                    echo 'Running npm dependency vulnerability audit...'
 
                     def npmAuditStatus = bat(
                         returnStatus: true,
@@ -65,10 +81,10 @@ pipeline {
                     bat 'type security-reports\\npm-audit-report.txt'
 
                     if (npmAuditStatus != 0) {
-                        error('Security gate failed: npm audit found a high severity dependency vulnerability.')
+                        error('Security gate failed: npm audit found a high severity dependency vulnerability or the audit command failed.')
                     }
 
-                    echo 'Running Trivy Docker image vulnerability scan...'
+                    echo 'Running Trivy scan on the Docker image...'
 
                     def trivyStatus = bat(
                         returnStatus: true,
@@ -92,22 +108,62 @@ pipeline {
                         error('Security gate failed: Trivy found a high or critical vulnerability in the Docker image.')
                     }
                 }
+
+                echo 'Security checks completed successfully.'
+            }
+        }
+
+        stage('Deploy') {
+            steps {
+                echo 'Deploying the verified image to the staging environment...'
+
+                bat 'docker rm -f %STAGING_CONTAINER% >nul 2>&1 || echo No previous staging container to remove.'
+
+                bat 'docker run -d --name %STAGING_CONTAINER% -p %STAGING_PORT%:3000 %APP_NAME%:%IMAGE_TAG%'
+
+                bat 'docker ps --filter "name=%STAGING_CONTAINER%"'
+
+                script {
+                    echo 'Checking whether the staging application is healthy...'
+
+                    def stagingHealthStatus = bat(
+                        returnStatus: true,
+                        script: '''
+                            @echo off
+                            for /L %%i in (1,1,10) do (
+                                curl.exe --fail --silent --show-error http://localhost:%STAGING_PORT%/health && exit /b 0
+                                echo Waiting for staging application to start...
+                                ping 127.0.0.1 -n 3 >nul
+                            )
+                            exit /b 1
+                        '''
+                    )
+
+                    if (stagingHealthStatus != 0) {
+                        echo 'Staging health check failed. Displaying container logs...'
+                        bat 'docker logs %STAGING_CONTAINER%'
+                        error('Deployment failed: the staging application health endpoint did not respond successfully.')
+                    }
+                }
+
+                echo 'Staging deployment completed successfully.'
             }
         }
     }
 
     post {
         always {
+            echo 'Archiving pipeline evidence files...'
             archiveArtifacts artifacts: 'coverage/**/*', allowEmptyArchive: true
             archiveArtifacts artifacts: 'security-reports/**/*', allowEmptyArchive: true
         }
 
         success {
-            echo 'Build, testing, code quality and security analysis completed successfully.'
+            echo 'Build, testing, code quality, security scanning and staging deployment completed successfully.'
         }
 
         failure {
-            echo 'The pipeline failed. Review the failed stage before continuing.'
+            echo 'The pipeline failed. Review the failed stage in the Jenkins console output.'
         }
     }
 }
