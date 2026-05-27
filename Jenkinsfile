@@ -12,7 +12,7 @@ pipeline {
                 bat 'git --version'
                 bat 'node -v'
                 bat 'npm -v'
-                bat 'docker --version'
+                bat 'docker version'
             }
         }
 
@@ -29,6 +29,26 @@ pipeline {
                 bat 'npm test'
             }
         }
+
+        stage('Code Quality') {
+            steps {
+                script {
+                    def scannerHome = tool 'SonarScanner'
+
+                    withSonarQubeEnv('LocalSonarQube') {
+                        bat "\"${scannerHome}\\bin\\sonar-scanner.bat\" -Dsonar.projectVersion=%BUILD_NUMBER%"
+                    }
+                }
+            }
+        }
+
+        stage('Quality Gate') {
+            steps {
+                timeout(time: 5, unit: 'MINUTES') {
+                    waitForQualityGate abortPipeline: true
+                }
+            }
+        }
     }
 
     post {
@@ -37,11 +57,11 @@ pipeline {
         }
 
         success {
-            echo 'ScamShield build and tests completed successfully.'
+            echo 'Build, testing and code quality analysis completed successfully.'
         }
 
         failure {
-            echo 'The pipeline failed. Check the failed stage in the console output.'
+            echo 'The pipeline failed. Review the failed stage before continuing.'
         }
     }
 }
