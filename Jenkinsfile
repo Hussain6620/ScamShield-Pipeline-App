@@ -7,6 +7,9 @@ pipeline {
 
         STAGING_CONTAINER = 'scamshield-staging'
         STAGING_PORT = '3001'
+
+        PRODUCTION_CONTAINER = 'scamshield-production'
+        PRODUCTION_PORT = '3000'
     }
 
     stages {
@@ -149,6 +152,50 @@ pipeline {
                 echo 'Staging deployment completed successfully.'
             }
         }
+
+        stage('Release') {
+            steps {
+                echo 'Promoting the verified staging image to production...'
+
+                bat 'docker tag %APP_NAME%:%IMAGE_TAG% %APP_NAME%:v1.0.%BUILD_NUMBER%'
+
+                echo 'Displaying the versioned production image...'
+                bat 'docker images %APP_NAME%'
+
+                bat 'docker rm -f %PRODUCTION_CONTAINER% >nul 2>&1 || echo No previous production container to remove.'
+
+                bat 'docker rm -f scamshield-local >nul 2>&1 || echo No earlier local test container to remove.'
+
+                bat 'docker run -d --name %PRODUCTION_CONTAINER% -p %PRODUCTION_PORT%:3000 -e NODE_ENV=production %APP_NAME%:v1.0.%BUILD_NUMBER%'
+
+                bat 'docker ps --filter "name=%PRODUCTION_CONTAINER%"'
+
+                script {
+                    echo 'Checking whether the production application is healthy...'
+
+                    def productionHealthStatus = bat(
+                        returnStatus: true,
+                        script: '''
+                            @echo off
+                            for /L %%i in (1,1,10) do (
+                                curl.exe --fail --silent --show-error http://localhost:%PRODUCTION_PORT%/health && exit /b 0
+                                echo Waiting for production application to start...
+                                ping 127.0.0.1 -n 3 >nul
+                            )
+                            exit /b 1
+                        '''
+                    )
+
+                    if (productionHealthStatus != 0) {
+                        echo 'Production health check failed. Displaying container logs...'
+                        bat 'docker logs %PRODUCTION_CONTAINER%'
+                        error('Release failed: the production application health endpoint did not respond successfully.')
+                    }
+                }
+
+                echo 'Production release completed successfully.'
+            }
+        }
     }
 
     post {
@@ -159,7 +206,7 @@ pipeline {
         }
 
         success {
-            echo 'Build, testing, code quality, security scanning and staging deployment completed successfully.'
+            echo 'Build, testing, code quality, security scanning, staging deployment and production release completed successfully.'
         }
 
         failure {
